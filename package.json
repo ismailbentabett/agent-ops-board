@@ -4,15 +4,17 @@
   "private": true,
   "description": "Small Next.js + TypeScript board for tracking coding-agent tasks. Built to show an agentic workflow with Claude Code.",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "dev": "node init && next dev",
+    "build": "node init && next build",
+    "start": "node init && next start",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "seed": "node scripts/seed.mjs"
   },
   "dependencies": {
+    "dotenv": "^8.2.0",
     "next": "^16.4.6",
+    "node-fetch": "^3.3.2",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
