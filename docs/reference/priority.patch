@@ -1,0 +1,372 @@
+diff --git a/docs/SPEC.md b/docs/SPEC.md
+index 14812e6..e26ead2 100644
+--- a/docs/SPEC.md
++++ b/docs/SPEC.md
+@@ -7,19 +7,20 @@ One place to see every task handed to a coding agent and where it is: todo, agen
+ One developer or a small team. No login in v1.
+ 
+ ## 3. Data
+-Task: `id`, `title` (1 to 120 characters), `status` (`todo` | `running` | `review` | `done`), `notes` (0 to 2000 characters), `createdAt`, `updatedAt`.
++Task: `id`, `title` (1 to 120 characters), `status` (`todo` | `running` | `review` | `done`), `priority` (`low` | `normal` | `high`, default `normal`), `notes` (0 to 2000 characters), `createdAt`, `updatedAt`.
+ 
+ ## 4. API
+ - `GET /api/tasks` returns `{ tasks }`, newest first.
+-- `POST /api/tasks` body `{ title, notes? }` returns 201 `{ task }`, status starts as `todo`.
+-- `PATCH /api/tasks/:id` body any of `{ title, status, notes }` returns `{ task }`. 404 if missing, 400 if the patch is empty or invalid.
++- `POST /api/tasks` body `{ title, notes?, priority? }` returns 201 `{ task }`, status starts as `todo`.
++- `PATCH /api/tasks/:id` body any of `{ title, status, priority, notes }` returns `{ task }`. 404 if missing, 400 if the patch is empty or invalid.
+ - `DELETE /api/tasks/:id` returns 204, 404 if missing.
+ - Errors are `{ error: string }`.
+ 
+ ## 5. UI
+ - Four columns, one per status, each with a count and an empty state.
+ - Add form with title and notes. A failed add shows the server error under the form.
+-- Each card has a status select and a delete button.
++- Each card has a priority badge, a status select and a delete button.
++- A priority filter above the columns: All, High, Normal, Low.
+ 
+ ## 6. Non-goals (v1)
+ Login, drag and drop, realtime sync, comments.
+diff --git a/scripts/e2e.mjs b/scripts/e2e.mjs
+index 117a36b..d81409d 100644
+--- a/scripts/e2e.mjs
++++ b/scripts/e2e.mjs
+@@ -30,9 +30,21 @@ await page.getByRole("button", { name: "Add task" }).click();
+ await page.getByRole("alert").waitFor();
+ if (shots) await page.screenshot({ path: `${shots}/board-error.png` });
+ 
++const urgent = `e2e urgent ${Date.now()}`;
++await page.getByLabel("Task title").fill(urgent);
++await page.getByLabel("Priority", { exact: true }).selectOption("high");
++await page.getByRole("button", { name: "Add task" }).click();
++await page.getByRole("heading", { name: urgent }).waitFor();
++await page.getByRole("button", { name: "High" }).click();
++await page.getByRole("heading", { name: title }).waitFor({ state: "detached" });
++if ((await page.locator("article .badge.high").count()) < 1) fail("high badge missing");
++await page.getByRole("button", { name: "All" }).click();
++await page.getByRole("heading", { name: title }).waitFor();
++await page.locator("article", { hasText: urgent }).getByRole("button", { name: "Delete" }).click();
++
+ const card = page.locator("article", { hasText: title });
+ await card.getByRole("button", { name: "Delete" }).click();
+ await card.waitFor({ state: "detached" });
+ 
+ await browser.close();
+-if (!process.exitCode) console.log("e2e ok: add, move, validation error, delete");
++if (!process.exitCode) console.log("e2e ok: add, move, validation error, priority filter, delete");
+diff --git a/scripts/seed.mjs b/scripts/seed.mjs
+index 1d82e26..3de11ca 100644
+--- a/scripts/seed.mjs
++++ b/scripts/seed.mjs
+@@ -9,6 +9,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS tasks (
+   id INTEGER PRIMARY KEY AUTOINCREMENT,
+   title TEXT NOT NULL,
+   status TEXT NOT NULL DEFAULT 'todo',
++  priority TEXT NOT NULL DEFAULT 'normal',
+   notes TEXT NOT NULL DEFAULT '',
+   created_at TEXT NOT NULL,
+   updated_at TEXT NOT NULL
+@@ -16,15 +17,15 @@ db.exec(`CREATE TABLE IF NOT EXISTS tasks (
+ db.exec("DELETE FROM tasks");
+ const now = Date.now();
+ const rows = [
+-  ["Write the spec for the export endpoint", "done", "docs/SPEC.md, section 4"],
+-  ["Add rate limiting to the public API", "review", "Agent opened a PR, check the diff"],
+-  ["Migrate the invoice table to Postgres", "running", "Plan approved, slice 2 of 4"],
+-  ["Fix the flaky checkout test", "running", "Playwright trace attached"],
+-  ["Add CSV export to the reports page", "todo", ""],
+-  ["Document the deploy steps", "todo", "Keep it to one page"],
++  ["Write the spec for the export endpoint", "done", "docs/SPEC.md, section 4", "normal"],
++  ["Add rate limiting to the public API", "review", "Agent opened a PR, check the diff", "high"],
++  ["Migrate the invoice table to Postgres", "running", "Plan approved, slice 2 of 4", "high"],
++  ["Fix the flaky checkout test", "running", "Playwright trace attached", "normal"],
++  ["Add CSV export to the reports page", "todo", "", "low"],
++  ["Document the deploy steps", "todo", "Keep it to one page", "low"],
+ ];
+-rows.forEach(([title, status, notes], index) => {
++rows.forEach(([title, status, notes, priority], index) => {
+   const stamp = new Date(now - (rows.length - index) * 3600_000).toISOString();
+-  db.prepare("INSERT INTO tasks (title, status, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(title, status, notes, stamp, stamp);
++  db.prepare("INSERT INTO tasks (title, status, priority, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)").run(title, status, priority, notes, stamp, stamp);
+ });
+ console.log(`seeded ${rows.length} tasks into ${file}`);
+diff --git a/src/app/globals.css b/src/app/globals.css
+index c636577..2d5a742 100644
+--- a/src/app/globals.css
++++ b/src/app/globals.css
+@@ -30,3 +30,11 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
+   .columns { grid-template-columns: 1fr; }
+   .add { grid-template-columns: 1fr; }
+ }
++
++.filters { display: flex; gap: 8px; margin: 0 0 16px; }
++.chip { border: 1px solid #cfd4dc; background: #fff; border-radius: 999px; padding: 4px 14px; font-size: 14px; cursor: pointer; }
++.chip.active { background: #2457d6; border-color: #2457d6; color: #fff; }
++.badge { display: inline-block; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; padding: 2px 8px; border-radius: 999px; margin-bottom: 6px; }
++.badge.high { background: #fde4e1; color: #a3261a; }
++.badge.normal { background: #e6ecfb; color: #1c3f9e; }
++.badge.low { background: #e8eaed; color: #4b5360; }
+diff --git a/src/components/TaskBoard.tsx b/src/components/TaskBoard.tsx
+index 65652b5..7d12ef3 100644
+--- a/src/components/TaskBoard.tsx
++++ b/src/components/TaskBoard.tsx
+@@ -1,7 +1,7 @@
+ "use client";
+ 
+ import { useState } from "react";
+-import { STATUSES, type Status, type Task } from "@/lib/types";
++import { PRIORITIES, STATUSES, type Priority, type Status, type Task } from "@/lib/types";
+ 
+ const LABELS: Record<Status, string> = {
+   todo: "Todo",
+@@ -10,10 +10,14 @@ const LABELS: Record<Status, string> = {
+   done: "Done",
+ };
+ 
++type Filter = "all" | Priority;
++
+ export function TaskBoard({ initialTasks }: { initialTasks: Task[] }) {
+   const [tasks, setTasks] = useState<Task[]>(initialTasks);
+   const [title, setTitle] = useState("");
+   const [notes, setNotes] = useState("");
++  const [priority, setPriority] = useState<Priority>("normal");
++  const [filter, setFilter] = useState<Filter>("all");
+   const [error, setError] = useState<string | null>(null);
+ 
+   async function addTask(event: React.FormEvent) {
+@@ -22,7 +26,7 @@ export function TaskBoard({ initialTasks }: { initialTasks: Task[] }) {
+     const response = await fetch("/api/tasks", {
+       method: "POST",
+       headers: { "content-type": "application/json" },
+-      body: JSON.stringify({ title, notes }),
++      body: JSON.stringify({ title, notes, priority }),
+     });
+     const data = await response.json();
+     if (!response.ok) {
+@@ -32,6 +36,7 @@ export function TaskBoard({ initialTasks }: { initialTasks: Task[] }) {
+     setTasks((current) => [data.task, ...current]);
+     setTitle("");
+     setNotes("");
++    setPriority("normal");
+   }
+ 
+   async function move(task: Task, status: Status) {
+@@ -65,12 +70,32 @@ export function TaskBoard({ initialTasks }: { initialTasks: Task[] }) {
+           value={notes}
+           onChange={(event) => setNotes(event.target.value)}
+         />
++        <select aria-label="Priority" value={priority} onChange={(event) => setPriority(event.target.value as Priority)}>
++          {PRIORITIES.map((value) => (
++            <option key={value} value={value}>
++              {value}
++            </option>
++          ))}
++        </select>
+         <button type="submit">Add task</button>
+       </form>
+       {error ? <p role="alert" className="error">{error}</p> : null}
++      <div className="filters" role="group" aria-label="Filter by priority">
++        {(["all", ...PRIORITIES] as Filter[]).map((value) => (
++          <button
++            key={value}
++            type="button"
++            aria-pressed={filter === value}
++            className={filter === value ? "chip active" : "chip"}
++            onClick={() => setFilter(value)}
++          >
++            {value === "all" ? "All" : value[0].toUpperCase() + value.slice(1)}
++          </button>
++        ))}
++      </div>
+       <section className="columns">
+         {STATUSES.map((status) => {
+-          const column = tasks.filter((task) => task.status === status);
++          const column = tasks.filter((task) => task.status === status && (filter === "all" || task.priority === filter));
+           return (
+             <div className="column" key={status}>
+               <h2>
+@@ -79,6 +104,7 @@ export function TaskBoard({ initialTasks }: { initialTasks: Task[] }) {
+               {column.length === 0 ? <p className="empty">Nothing here yet.</p> : null}
+               {column.map((task) => (
+                 <article className="card" key={task.id}>
++                  <span className={`badge ${task.priority}`}>{task.priority}</span>
+                   <h3>{task.title}</h3>
+                   {task.notes ? <p>{task.notes}</p> : null}
+                   <div className="actions">
+diff --git a/src/lib/db.ts b/src/lib/db.ts
+index 8317a3f..9d10172 100644
+--- a/src/lib/db.ts
++++ b/src/lib/db.ts
+@@ -9,6 +9,7 @@ const SCHEMA = `
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     title TEXT NOT NULL,
+     status TEXT NOT NULL DEFAULT 'todo',
++    priority TEXT NOT NULL DEFAULT 'normal',
+     notes TEXT NOT NULL DEFAULT '',
+     created_at TEXT NOT NULL,
+     updated_at TEXT NOT NULL
+@@ -19,6 +20,10 @@ export function openDb(file: string): DatabaseSync {
+   if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true });
+   const db = new DatabaseSync(file);
+   db.exec(SCHEMA);
++  const columns = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
++  if (!columns.some((column) => column.name === "priority")) {
++    db.exec("ALTER TABLE tasks ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'");
++  }
+   return db;
+ }
+ 
+diff --git a/src/lib/tasks.ts b/src/lib/tasks.ts
+index 7606ac5..f1df773 100644
+--- a/src/lib/tasks.ts
++++ b/src/lib/tasks.ts
+@@ -1,10 +1,11 @@
+ import type { DatabaseSync } from "node:sqlite";
+-import type { NewTask, Status, Task, TaskPatch } from "./types";
++import type { NewTask, Priority, Status, Task, TaskPatch } from "./types";
+ 
+ type Row = {
+   id: number;
+   title: string;
+   status: Status;
++  priority: Priority;
+   notes: string;
+   created_at: string;
+   updated_at: string;
+@@ -15,6 +16,7 @@ function toTask(row: Row): Task {
+     id: row.id,
+     title: row.title,
+     status: row.status,
++    priority: row.priority,
+     notes: row.notes,
+     createdAt: row.created_at,
+     updatedAt: row.updated_at,
+@@ -34,8 +36,8 @@ export function getTask(db: DatabaseSync, id: number): Task | null {
+ export function createTask(db: DatabaseSync, input: NewTask): Task {
+   const now = new Date().toISOString();
+   const result = db
+-    .prepare("INSERT INTO tasks (title, status, notes, created_at, updated_at) VALUES (?, 'todo', ?, ?, ?)")
+-    .run(input.title, input.notes ?? "", now, now);
++    .prepare("INSERT INTO tasks (title, status, priority, notes, created_at, updated_at) VALUES (?, 'todo', ?, ?, ?, ?)")
++    .run(input.title, input.priority ?? "normal", input.notes ?? "", now, now);
+   return getTask(db, Number(result.lastInsertRowid))!;
+ }
+ 
+@@ -43,9 +45,10 @@ export function updateTask(db: DatabaseSync, id: number, patch: TaskPatch): Task
+   const current = getTask(db, id);
+   if (!current) return null;
+   const next = { ...current, ...patch };
+-  db.prepare("UPDATE tasks SET title = ?, status = ?, notes = ?, updated_at = ? WHERE id = ?").run(
++  db.prepare("UPDATE tasks SET title = ?, status = ?, priority = ?, notes = ?, updated_at = ? WHERE id = ?").run(
+     next.title,
+     next.status,
++    next.priority,
+     next.notes,
+     new Date().toISOString(),
+     id,
+diff --git a/src/lib/types.ts b/src/lib/types.ts
+index 509a984..6f92859 100644
+--- a/src/lib/types.ts
++++ b/src/lib/types.ts
+@@ -1,10 +1,14 @@
+ export const STATUSES = ["todo", "running", "review", "done"] as const;
+ export type Status = (typeof STATUSES)[number];
+ 
++export const PRIORITIES = ["low", "normal", "high"] as const;
++export type Priority = (typeof PRIORITIES)[number];
++
+ export type Task = {
+   id: number;
+   title: string;
+   status: Status;
++  priority: Priority;
+   notes: string;
+   createdAt: string;
+   updatedAt: string;
+@@ -13,10 +17,12 @@ export type Task = {
+ export type NewTask = {
+   title: string;
+   notes?: string;
++  priority?: Priority;
+ };
+ 
+ export type TaskPatch = {
+   title?: string;
+   status?: Status;
++  priority?: Priority;
+   notes?: string;
+ };
+diff --git a/src/lib/validate.ts b/src/lib/validate.ts
+index 35d0f05..ddd3fd3 100644
+--- a/src/lib/validate.ts
++++ b/src/lib/validate.ts
+@@ -1,4 +1,4 @@
+-import { STATUSES, type NewTask, type Status, type TaskPatch } from "./types";
++import { PRIORITIES, STATUSES, type NewTask, type Priority, type Status, type TaskPatch } from "./types";
+ 
+ export class ValidationError extends Error {}
+ 
+@@ -6,6 +6,15 @@ function isStatus(value: unknown): value is Status {
+   return typeof value === "string" && (STATUSES as readonly string[]).includes(value);
+ }
+ 
++function isPriority(value: unknown): value is Priority {
++  return typeof value === "string" && (PRIORITIES as readonly string[]).includes(value);
++}
++
++function parsePriority(value: unknown): Priority {
++  if (!isPriority(value)) throw new ValidationError(`priority must be one of ${PRIORITIES.join(", ")}`);
++  return value;
++}
++
+ function cleanText(value: unknown, field: string, max: number): string {
+   if (typeof value !== "string") throw new ValidationError(`${field} must be a string`);
+   const trimmed = value.trim();
+@@ -19,7 +28,8 @@ export function parseNewTask(body: unknown): NewTask {
+   const title = cleanText(input.title, "title", 120);
+   if (title.length === 0) throw new ValidationError("title is required");
+   const notes = input.notes === undefined ? "" : cleanText(input.notes, "notes", 2000);
+-  return { title, notes };
++  const priority = input.priority === undefined ? "normal" : parsePriority(input.priority);
++  return { title, notes, priority };
+ }
+ 
+ export function parseTaskPatch(body: unknown): TaskPatch {
+@@ -32,6 +42,7 @@ export function parseTaskPatch(body: unknown): TaskPatch {
+     patch.title = title;
+   }
+   if (input.notes !== undefined) patch.notes = cleanText(input.notes, "notes", 2000);
++  if (input.priority !== undefined) patch.priority = parsePriority(input.priority);
+   if (input.status !== undefined) {
+     if (!isStatus(input.status)) throw new ValidationError(`status must be one of ${STATUSES.join(", ")}`);
+     patch.status = input.status;
+diff --git a/tests/tasks.test.ts b/tests/tasks.test.ts
+index fa36a57..c1587a3 100644
+--- a/tests/tasks.test.ts
++++ b/tests/tasks.test.ts
+@@ -58,3 +58,25 @@ describe("validation", () => {
+     expect(parseTaskPatch({ status: "running" })).toEqual({ status: "running" });
+   });
+ });
++
++describe("priority", () => {
++  it("defaults to normal and stores a given priority", () => {
++    expect(createTask(db, { title: "a" }).priority).toBe("normal");
++    expect(createTask(db, { title: "b", priority: "high" }).priority).toBe("high");
++  });
++
++  it("patches the priority and keeps the status", () => {
++    const task = createTask(db, { title: "c" });
++    const updated = updateTask(db, task.id, { priority: "low" });
++    expect(updated?.priority).toBe("low");
++    expect(updated?.status).toBe("todo");
++  });
++
++  it("validates priority on create and patch", () => {
++    expect(parseNewTask({ title: "x" }).priority).toBe("normal");
++    expect(parseNewTask({ title: "x", priority: "high" }).priority).toBe("high");
++    expect(() => parseNewTask({ title: "x", priority: "urgent" })).toThrow(ValidationError);
++    expect(parseTaskPatch({ priority: "low" })).toEqual({ priority: "low" });
++    expect(() => parseTaskPatch({ priority: 3 })).toThrow(ValidationError);
++  });
++});
